@@ -1,0 +1,1708 @@
+---
+title: "FINAL PROJECT"
+author: "Nhom 1"
+date: "2024-12-29"
+output: html_document
+---
+
+# **Môn:** Xử lý số liệu thống kê  
+**Lớp:** 22TTH_KDL  
+**GV:** Tô Đức Khánh  
+**Final Project**  
+
+## **Nhóm SV: Nhóm 1**  
+
+**Thành viên:**  
+- Lê Tuấn Minh Thành - 22280083  
+- Hoàng Thái Hoàng - 22280028  
+- Hồng Đức Hoàng - 22280029  
+- Bạch Ngọc Lê Duy - 22280016  
+- Hoàng Minh Hiển - 22280021  
+- Nguyễn Phạm Anh Trí - 22110236  
+---
+
+# Library
+```{r}
+# install.packages('mgcViz')
+# install.packages('mice')
+# install.packages('Metrics')
+# install.packages('e1071')
+```
+
+```{r}
+library(car)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(janitor)
+library(psych)
+library(DataExplorer)
+library(carData)
+library(leaps)
+library(mice)
+library(VIM)
+library(dplyr)
+library(stringr)
+library(glmnet)
+library(caTools)
+library(mgcv)
+library(mgcViz)
+# library(MASS)
+library(caret)
+library(Metrics)
+library(reshape2)
+library(caret)  # Chia dữ liệu và xây dựng mô hình
+library(nnet)   # Hồi quy logistic đa lớp
+library(e1071)  # Naive Bayes
+library(pROC)
+```
+
+# *Tiền xử lý dữ liệu*
+```{r}
+# Đọc dataset và làm sạch tên cột
+fifa_data = read_csv("D:/Duy/Năm 3/Xử lý SLTK/Project nhóm (CK)/fifa_eda_stats.csv", na = c("", "NA", "N/A")) |> clean_names()
+```
+
+```{r}
+# Hàm chuyển đổi dạng tiền tệ sang số
+currency_to_numeric <- function(x) {
+  x <- gsub("€", "", x)
+  x <- gsub("M", "e6", x)
+  x <- gsub("K", "e3", x)
+  return(as.numeric(eval(parse(text = x))))
+}
+
+# Đổi dạng các cột value, wage và release_clause
+fifa_data$value <- sapply(fifa_data$value, currency_to_numeric)
+fifa_data$wage <- sapply(fifa_data$wage, currency_to_numeric)
+fifa_data$release_clause <- sapply(fifa_data$release_clause, currency_to_numeric)
+
+# Xử lý chiều cao (height) và cân nặng (weight)
+fifa_data$height <- as.numeric(gsub("'", ".", fifa_data$height))
+fifa_data$weight <- as.numeric(gsub("lbs", "", fifa_data$weight))
+
+# Loại bỏ các cột không cần thiết
+columns_to_drop <- c("loaned_from", "id", "jersey_number", "joined")
+fifa_data <- fifa_data %>% select(-all_of(columns_to_drop))
+```
+
+
+```{r}
+# checl na values
+colSums(is.na(fifa_data))
+```
+
+```{r}
+# Kiểm tra xu hướng dữ liệu khuyết 
+aggr(fifa_data, ylab = c("Proportion of missings", "Pattern"), number = TRUE, cex.axis = 0.6, cex.numbers = 0.5) 
+```
+Ta dễ dàng thấy đa số dữ liệu khuyết đều rất nhỏ, có biến release_clause cao hơn hẳn các biến còn lại nhưng tỷ lệ bé hơn 0.09. Và tỷ lệ khuyết của đa số các biến cùng vị trí nên ta có thể xem xét loại bỏ tất cả dữ liệu khuyết.
+
+```{r}
+# Xoá tất cả dữ liệu khuyết 
+fifa_data = na.omit(fifa_data)
+
+# Kiểm tra lại
+aggr(fifa_data, ylab = c("Proportion of missings", "Pattern"), number = TRUE, cex.axis = 0.6, cex.numbers = 0.5) 
+```
+Dữ liệu gần như đã clean!
+
+# *Khám phá dữ liệu*
+
+```{r}
+# Biểu đồ phân phối Overall Ratings
+ggplot(fifa_data, aes(x = overall)) +
+  geom_histogram(aes(y = ..density..), bins = 30, color = "black", fill = "green", alpha = 1) +
+  geom_density(alpha = 0.6, color = "red", linewidth = 1) +
+  labs(title = "Distribution of Overall Ratings", x = "Overall", y = "Frequency")
+```
+
+Biểu đồ overal tuân theo phân phối chuẩn. Đây một tín hiệu tích cực cho bài toán dự đoán. 
+
+```{r}
+# Biểu đồ phân phối Potential Ratings
+ggplot(fifa_data, aes(x = potential)) +
+  geom_histogram(aes(y = ..density..), bins = 30, color = "black", fill = "green", alpha = 1) +
+  geom_density(alpha = 0.6, color = "red", linewidth = 1) +  
+  labs(title = "Distribution of Potential Ratings", x = "Potential", y = "Frequency")
+```
+
+Vì phân phối chuẩn nên với bài toán classify thì ta phải chuyển potential thành biến phân loại (định tính). Và nếu chia ra 3 class (tiềm năng thấp, vừa, cao) hoặc cao hơn thì sẽ rất khó chia. Vì thể nhóm đề xuất chia làm 2 nhóm để dùng đưa bài toán trở về phân loại nhị phân với class thứ nhất là ít tiềm năng (gán nhãn 0 cho mẫu có potential <= mean) và class thứ 2 là có tiềm năng (gán nhãn 1 cho mẫu có potential > mean)
+
+```{r}
+# Biểu đồ phân phối Values
+ggplot(fifa_data, aes(x = value)) +
+  geom_histogram(bins = 100, fill = "blue", color = "black", alpha = 1) +
+  labs(title = "Distribution of Value", x = "Value (EUR)", y = "Frequency") +
+  theme_minimal()
+```
+
+Biểu đồ bị lệch phải và tồn tại nhiều giá trị ngoại lai (có thể sử dụng giá trị cook).Và đây là biến quan trọng để sử dụng cho bài toán dự đoán số tiền câu lạc bộ phải chi trả.
+
+
+```{r}
+# Biểu đồ số lượng theo vị trí (Position)
+ggplot(fifa_data, aes(x = position)) +
+  geom_bar(fill = "lightblue") +
+  labs(title = "Distribution of Positions", x = "Position", y = "Count")
+```
+
+Với Biểu đồ histogram số lượng mẫu theo từng vị trí thì có hiện tượng imbalance nên xem xét các phương pháp xử lý phù hợp. Ở đây chúng em đề xuất group lại thành 4 class chính là: GK (Thủ môn), DF (Cầu thủ phòng ngự), MID (Tiền vệ), FW (Cầu thủ tấn công). Như vậy thì sẽ giải quyết phần nào về vấn đề imbalance và giảm class giúp dễ dàng phân loại hơn.
+
+```{r}
+# Boxplot Overall Ratings theo vị trí
+ggplot(fifa_data, aes(x = position, y = overall)) +
+  geom_boxplot(fill = "lightgreen", alpha = 0.7) +
+  labs(title = "Overall Ratings by Position", x = "Position", y = "Overall")
+```
+
+*Nhận xét:*
+- Nếu bài toán phân loại liên quan đến việc dự đoán nhóm cầu thủ (ví dụ: Cao, Trung bình, Thấp), dữ liệu có thể gặp vấn đề mất cân bằng (imbalance).
+
+- Tạo nhóm hợp lý: Có thể chia thành 3 nhóm:
+Thấp: <60
+Trung bình: 60-75
+Cao: >75
+
+- Điều này sẽ giúp bài toán phân loại trở nên rõ ràng và dễ huấn luyện hơn. Nhưng chúng em không tiếp cận với bài toán này.
+
+```{r}
+# Phân phối theo Body Type
+ggplot(fifa_data, aes(x = body_type)) +
+  geom_bar(color = "black", fill = "blue", alpha = 0.7) +
+  labs(title = "Distribution of Body Types", x = "Body Type", y = "Count")
+```
+
+Dễ dàng thấy có 3 class chính là Lean, Normal và Stocky, còn lại gần như chỉ có 1 sample. 3 class chính cũng bị imbalance nên sử dụng để làm bài toán phân loại có vẽ không hợp lý và không có ích với việc giúp câu lạc bộ đưa ra quyết định. Và theo lý thuyết thì cũng khó để sử dụng biến này để đưa vào mô hình làm biến.
+
+```{r}
+# Phân phối nationality theo các liên đoàn bóng đá
+federations <- list(
+  UEFA = c("Spain", "Germany", "France", "England", "Italy", "Portugal", "Netherlands", "Belgium", "Sweden", "Russia", "Switzerland", "Croatia", "Poland", "Denmark", "Wales", "Slovakia", "Bosnia Herzegovina", "Serbia", "Austria", "Greece", "Finland", "Montenegro", "Armenia", "Norway", "Czech Republic", "Scotland", "Ukraine", "Iceland", "Albania", "Hungary", "Republic of Ireland", "Romania", "Northern Ireland", "Estonia", "FYR Macedonia", "Bulgaria", "Kosovo", "Georgia", "Belarus", "Moldova", "Lithuania", "Luxembourg", "Liechtenstein", "Latvia", "Azerbaijan", "Faroe Islands", "Andorra", "Malta"),
+  CONMEBOL = c("Brazil", "Argentina", "Colombia", "Uruguay", "Chile", "Ecuador", "Paraguay", "Venezuela", "Peru", "Bolivia"),
+  CONCACAF = c("Mexico", "United States", "Costa Rica", "Jamaica", "Dominican Republic", "Honduras", "Canada", "Curacao", "Trinidad & Tobago", "Panama", "Cuba", "Haiti", "Grenada", "St Kitts Nevis", "El Salvador", "Antigua & Barbuda", "Guatemala", "Nicaragua", "Barbados", "Puerto Rico"),
+  CAF = c("Senegal", "Nigeria", "Egypt", "Morocco", "Algeria", "Gabon", "Ghana", "Central African Rep.", "DR Congo", "Ivory Coast", "Tunisia", "South Africa", "Guinea", "Kenya", "Cape Verde", "Mali", "Cameroon", "Burkina Faso", "Zimbabwe", "Angola", "Equatorial Guinea", "Guinea Bissau", "Madagascar", "Tanzania", "Gambia", "Benin", "Congo", "Mozambique", "Sierra Leone", "Zambia", "Chad", "Comoros", "Libya", "Eritrea", "Burundi", "Namibia", "Sudan", "Rwanda", "Mauritania", "Botswana", "Liberia", "Niger", "Ethiopia"),
+  AFC = c("Japan", "Korea Republic", "Iran", "Australia", "Saudi Arabia", "China PR", "Uzbekistan", "Syria", "Iraq", "India", "Lebanon", "Jordan", "Qatar", "Afghanistan", "Hong Kong", "Indonesia", "Thailand", "Kuwait"),
+  OFC = c("New Zealand", "Fiji", "New Caledonia", "Guam")
+)
+
+fifa_data$federation <- sapply(fifa_data$nationality, function(x) {
+  found <- "Other"
+  for (fed in names(federations)) {
+    if (x %in% federations[[fed]]) {
+      found <- fed
+      break
+    }
+  }
+  return(found)
+})
+
+ggplot(fifa_data, aes(x = federation)) +
+  geom_bar(color = "black", fill = "orange", alpha = 0.7) +
+  labs(title = "Distribution of Players by Federation", x = "Federation", y = "Count") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Nhóm xem xét về việc sử dụng biến nationality (quốc gia) để dùng làm biến trong một mô hình nào đó, tuy nhiên vì đây là biến định tính và số lượng class rất nhiền nên khó xử lý. Vì thế chúng em nhóm lại chia thành các liên đoàn bóng đá. Và biểu đồ cho thấy các class theo liên đoàn bóng đá cũng khá bị imbalance nhưng có thể xử lý được bằng cách loại bỏ "OFC". Và có thể 
+dùng cho bài toán phân loại liên đoàn. Nhưng nhóm không tiếp cận bài toán này.
+
+
+```{r}
+plot(fifa_data$potential, fifa_data$value, main="Potential vs value", 
+     xlab="potential", ylab="value", 
+     pch=19, col="blue")
+```
+```{r}
+plot(fifa_data$potential, fifa_data$age, main="Potential vs Age", 
+     xlab="potential", ylab="age", 
+     pch=19, col="blue")
+```
+
+```{r}
+# Tạo ma trận tương quan và bỏ các feature kỹ thuật
+tech_features = c("weak_foot", "skill_moves", "crossing", "finishing", "heading_accuracy", 
+                   "short_passing", "volleys", "dribbling", "curve", "long_passing", 
+                   "ball_control", "acceleration", "sprint_speed", "agility", 
+                   "reactions", "balance", "shot_power", "jumping", "stamina", "strength", 
+                   "long_shots", "aggression", "interceptions", "positioning", "vision", 
+                   "penalties", "composure", "marking", "standing_tackle", "sliding_tackle",
+                   "gk_diving", "gk_handling", "gk_kicking", "gk_positioning", "gk_reflexes",
+                   "fk_accuracy")
+
+correlation_matrix = fifa_data %>% 
+  dplyr::select(-all_of(tech_features)) %>% 
+  dplyr::select(where(is.numeric)) %>% 
+  cor(use = "complete.obs")
+
+melted_corr = melt(correlation_matrix)
+ggplot(melted_corr, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Correlation") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Heatmap of Correlation Matrix", x = "Features", y = "Features")
+```
+
+
+- Các biến như release clause, overall, potential, value, wage và reputation có mối tương quan cao
+
+- Các biến weight, height có mối tương quan cao
+
+- Biến age có tương quan cao đối với overall và tương quan nghịch đối với potential
+
+- Nếu hai đặc trưng có mối tương quan rất cao hoặc tương quan nghịch mạnh, ta chỉ cần giữ lại một đặc trưng để tránh gây nhiễu cho mô hình. (xử lý đa cộng tuyến)
+
+```{r}
+correlation_matrix_tech <- fifa_data %>% 
+  dplyr::select(all_of(tech_features) | value) %>% 
+  cor(use = "complete.obs")
+
+# Biểu diễn ma trận tương quan thông số kỹ thuật (demo)
+melted_corr_tech <- melt(correlation_matrix_tech)
+ggplot(melted_corr_tech, aes(Var1, Var2, fill = value)) +
+  geom_tile(color = "white") +
+  scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                       midpoint = 0, limit = c(-1,1), space = "Lab", 
+                       name="Tương quan") +
+  theme_minimal() + 
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                   size = 10, hjust = 1)) +
+  coord_fixed() +
+  labs(title = "Heatmap of Correlation Matrix using technical stats", x = "Features", y = "Features")
+
+```
+
+Tương tự như biểu đồ trên, có rất nhiều biến có hệ số tương quan cao và ta cần xử lý chi tiết hơn thay vì đọc biểu đồ này. 
+
+# *Xây dựng bài toán*
+
+## Bài toán 1: Dự đoán số tiền (Value) câu lạc bộ phải chi trả 
+
+> Với bài toán này nhóm em chia ra làm 2 phương pháp tiếp cận: dự đoán value dựa trên các biến nontechnical (không phải biến kỹ thuật) và trên các biến technical (các biến đánh giá chỉ số kỹ thuật)
+
+### Cách tiếp cận 1: Dự đoán value dựa trên các biến Nontechnical
+#### Xây dựng mô hình
+```{r}
+# Tạo mô hình hồi quy tuyến tính đa biến với Y = value và X là các biến nontechnical
+m_value_non_tech = lm(value ~ age + overall + wage + international_reputation
+                       + release_clause, fifa_data)
+```
+
+vì 2 biến overall và potential có khả năng tương quan cao nên không đưa vào mô hình cùng lúc để tránh đa cộng tuyến
+
+#### Lựa chọn mô hình
+```{r}
+# tìm tập biến tốt nhất cho mô hình
+out_subset_m_value_non_tech <- regsubsets(x = value ~ age + overall + wage + international_reputation
+                                          + release_clause, 
+                                          data = fifa_data, nvmax = 5, method = "exhaustive")
+summary(out_subset_m_value_non_tech)
+
+
+# chỉ số Mallows' Cp càng nhỏ -> mô hình càng tốt
+sum_out_subset_m_value_non_tech <- summary(out_subset_m_value_non_tech)
+sum_out_subset_m_value_non_tech$cp
+
+```
+
+Từ kết quả trên ta thấy tập kết quả chứa 4 biến là tốt nhất. Ta xây dựng lại mô hình với 4 biến overall, wage, international_reputation và release_clause
+
+```{r}
+m_value_non_tech = lm(value ~ overall + wage + international_reputation
+                       + release_clause, fifa_data)
+```
+
+Tính sai số cho mô hình
+
+```{r}
+# Residuals
+res <- residuals(m_value_non_tech)
+
+# SSE
+SSE <- sum(res^2)
+
+# MSE
+MSE <- SSE / length(res)
+
+# RMSE
+RMSE <- sqrt(MSE)
+
+# R-squared
+r_squared <- summary(m_value_non_tech)$r.squared
+
+# RSE
+RSE <- sqrt(SSE / (length(m_value_non_tech) - length(coef(m_value_non_tech)) - 1))
+
+# In kết quả
+cat("SSE: ", SSE, "\n")
+cat("MSE: ", MSE, "\n")
+cat("RMSE: ", RMSE, "\n")
+cat("R-squared: ", r_squared, "\n")
+cat("RSE: ", RSE, "\n")
+```
+
+Hệ số R-squared = 0.9898, cho thấy mô hình giải thích được 98.98% biến thiên trong giá trị chuyển nhượng
+
+#### Chẩn đoán cho mô hình
+
+```{r}
+# kiểm tra tính tuyến tính
+ggplot(data = m_value_non_tech, mapping = aes(x = .fitted, y = .resid)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Fitted values", y = "Residuals") +
+  theme_bw()
+```
+
+Đường màu xanh không hoàn toàn khớp với đường nét đứt (y = 0) mà có xu hướng cong nhẹ ở vùng có giá trị dự đoán cao. Chứng tỏ giả định về tính tuyến tính của mô hình là chưa phù hợp
+
+##### kiểm tra tính đồng nhất phương sai
+```{r}
+ggplot(data = m_value_non_tech, mapping = aes(x = .fitted, y = sqrt(abs(.stdresid)))) +
+  geom_point(na.rm = TRUE) +
+  geom_smooth(method = "loess", se = FALSE, na.rm = TRUE) +
+  labs(x = "Fitted Values", y = expression(sqrt("|Standardized residuals|"))) +
+  theme_bw()
+```
+
+Đường màu xanh có xu hướng đi lên khi giá trị dự đoán tăng. Điều này chứng tỏ phương sai phần dư không đồng nhất mà tăng dần theo giá trị dự đoán. 
+
+##### kiểm tra các giá trị ngoại lai
+```{r}
+ggplot(m_value_non_tech, aes(.hat, .stdresid)) +
+  geom_point(aes(size = .cooksd)) +
+  xlab("Leverage") + ylab("Standardized Residuals") +
+  scale_size_continuous("Cook's Distance", range = c(1, 6)) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+Kiểm tra xem các điểm có Cook's Distance lớn chiếm bao nhiêu phần trăm dữ liệu
+
+```{r}
+cooks_D_md_m_value_non_tech <- cooks.distance(m_value_non_tech)
+
+count_001 <- sum(cooks_D_md_m_value_non_tech >= 0.5)
+count_002 <- sum(cooks_D_md_m_value_non_tech >= 1.0)
+count_003 <- sum(cooks_D_md_m_value_non_tech >= 1.5)
+
+# Tính phần trăm so với tổng số dữ liệu
+total_count <- length(cooks_D_md_m_value_non_tech)
+percent_001 <- (count_001 / total_count) * 100
+percent_002 <- (count_002 / total_count) * 100
+percent_003 <- (count_003 / total_count) * 100
+
+cat("Phần trăm của dữ liệu có Cook's Distance >= 0.5 là:", percent_001, "%\n")
+cat("Phần trăm của dữ liệu có Cook's Distance >= 1.0 là:", percent_002, "%\n")
+cat("Phần trăm của dữ liệu có Cook's Distance >= 1.5 là:", percent_003, "%\n")
+
+```
+
+các điểm có cook's distance >= 0.5 chỉ chiếm khoảng 0.02% tổng dữ liệu nên không ảnh hưởng đáng kể đến mô hình
+
+##### kiểm tra hiện tượng đa cộng tuyến
+```{r}
+library(car)
+vif(m_value_non_tech)
+```
+
+vif của tất cả các biến đều nhỏ hơn 5 -> không có hiện tượng đa cộng tuyến
+
+#### Mở rộng mô hình
+##### Model GLM 
+
+Mô hình GLM sử dụng phân phối Gamma để mô hình hóa cho dữ liệu bị lệch phải
+
+Vì hàm Gamma không chấp nhận giá trị 0 nên ta xem xét các giá trị 0 chiếm bao nhiêu phần trăm trong value
+
+```{r}
+# Số lượng giá trị bằng 0
+num_zeros <- sum(fifa_data$value == 0)
+
+# Tổng số giá trị
+total_values <- length(fifa_data$value)
+
+# Tính tỷ lệ phần trăm
+percent_zeros <- (num_zeros / total_values) * 100
+cat("Phần trăm các giá trị bé hơn hoặc bằng 0 trong biến Value là:", percent_zeros, "%\n")
+
+```
+
+Không tồn tại các giá trị có value bằng 0 nên ta có thể áp dụng mô hình GLM
+
+```{r}
+# family: kiểu phân phối
+# link: hàm liên kết mặc định
+m_value_non_tech_glm <- glm(value ~ overall + wage + international_reputation
+                      + release_clause, family = Gamma(link = "log"), data = fifa_data)
+summary(m_value_non_tech_glm)
+```
+
+Kiểm tra lại các giả định một lần nữa bằng biểu đồ Residual - fitted
+
+```{r}
+ggplot(data = m_value_non_tech_glm, mapping = aes(x = .fitted, y = .resid)) +
+geom_point() +
+geom_smooth(method = "loess", se = FALSE) +
+geom_hline(yintercept = 0, linetype = "dashed") +
+labs(x = "Fitted values", y = "Residuals") +
+theme_bw()
+
+```
+
+Phần dư trong biểu đồ trên giảm dần theo chiều tăng của biến đáp ứng chứng tỏ hiện tượng mất đồng nhất phương sai vẫn còn tồn tại. Mô hình GLM có lẽ không hoạt động tốt trên tập dữ liệu này
+
+##### Model GAM
+
+GAM có thể áp dụng cho toàn bộ biến hoặc một số biến trong mô hình. Ta chỉ có 4 biến đầu vào nên ta sẽ kiểm tra tính tuyến tính từng phần của từng biến bằng biểu đồ thặng dư từng phần
+
+```{r}
+# tính hệ số ước lượng của tất cả các biến
+terms_m_value_non_tech <- predict(m_value_non_tech, type = "terms")
+
+# thặng dư từng phần của tất cả các biến
+partial_resid_m_value_non_tech <- residuals(m_value_non_tech, type = "partial")
+```
+
+```{r}
+# overall
+data_part_resid_overall <- tibble(
+  overall = fifa_data$overall,
+  terms_overall = terms_m_value_non_tech[, "overall"],
+  partial_resid_overall = partial_resid_m_value_non_tech[, "overall"]
+)
+ggplot(data_part_resid_overall, mapping = aes(overall, partial_resid_overall)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+              color = "forestgreen") +
+  geom_line(aes(x = overall, y = terms_overall), color = "blue") +
+  labs(x = "Overall", y = "Partial Residuals") +
+  theme_bw()
+```
+
+Không có quan hệ tuyến tính giữa overall và value
+
+```{r}
+# wage
+data_part_resid_wage <- tibble(
+  wage = fifa_data$wage,
+  terms_wage = terms_m_value_non_tech[, "wage"],
+  partial_resid_wage = partial_resid_m_value_non_tech[, "wage"]
+)
+ggplot(data_part_resid_wage, mapping = aes(wage, partial_resid_wage)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+              color = "forestgreen") +
+  geom_line(aes(x = wage, y = terms_wage), color = "blue") +
+  labs(x = "Wage", y = "Partial Residuals") +
+  theme_bw()
+ 
+```
+
+Không có quan hệ tuyến tính giữa wage và value
+
+```{r}
+# international_reputation
+# đây là biến rời rạc
+data_part_resid_inter_rep <- tibble(
+  inter_rep = fifa_data$international_reputation,
+  terms_inter_rep = terms_m_value_non_tech[, "international_reputation"],
+  partial_resid_inter_rep = partial_resid_m_value_non_tech[, "international_reputation"]
+)
+ggplot(data_part_resid_inter_rep, mapping = aes(inter_rep, partial_resid_inter_rep)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+              color = "forestgreen", span = 1) +
+  geom_line(aes(x = inter_rep, y = terms_inter_rep), color = "blue") +
+  labs(x = "International Reputation", y = "Partial Residuals") +
+  theme_bw()
+
+```
+
+Không quan hệ tuyến tính giữa international reputation và value
+
+```{r}
+# release_clause
+data_part_resid_rel_cl <- tibble(
+  rel_cl = fifa_data$release_clause,
+  terms_rel_cl = terms_m_value_non_tech[, "release_clause"],
+  partial_resid_rel_cl = partial_resid_m_value_non_tech[, "release_clause"]
+)
+ggplot(data_part_resid_rel_cl, mapping = aes(rel_cl, partial_resid_rel_cl)) +
+  geom_point() +
+  geom_smooth(method = "loess", se = FALSE, linetype = "dashed",
+              color = "forestgreen") +
+  geom_line(aes(x = rel_cl, y = terms_rel_cl), color = "blue") +
+  labs(x = "Release Clause", y = "Partial Residuals") +
+  theme_bw()
+
+```
+
+Có quan hệ tuyến tính giữa release clause và value
+
+```{r}
+m_value_non_tech_gam = gam(value ~ s(overall) + s(wage) + s(international_reputation, k = 5)
+                      + release_clause, data = fifa_data)
+summary(m_value_non_tech_gam)
+```
+
+```{r}
+# Tính hệ số ước lượng cho từng biến
+terms_m_value_non_tech_gam = predict(m_value_non_tech_gam, type = "terms")
+
+# Tính thặng dư từng phần
+partial_resid_m_value_non_tech_gam = residuals(m_value_non_tech_gam, type = "working") + terms_m_value_non_tech_gam
+
+# Vẽ hàm trơn được ước lượng
+viz_m_value_non_tech_gam = getViz(m_value_non_tech_gam)
+print(plot(viz_m_value_non_tech_gam, allTerms = TRUE), pages = 1)
+```
+
+Từ 4 biểu đồ trên ta có thể thấy hệ số ước lượng của các biến (đường nét liền) luôn nằm giữa và không quá xa khoảng tin cậy (2 đường nét đứt). Điều này chừng tỏ mô hình có độ ổn định cao và các kết quả ước lượng đáng tin cậy
+
+Để tiên đoán dựa trên của mô hình ta chia tập dữ liệu thành 2 tập train và test với tỷ lệ 7:3
+
+```{r}
+set.seed(123)  # Để đảm bảo kết quả có thể tái tạo
+
+# Chia tập dữ liệu theo tỷ lệ 70% train, 30% test
+train_index <- sample(1:nrow(fifa_data), 0.7 * nrow(fifa_data))
+train_data <- fifa_data[train_index, ]
+test_data <- fifa_data[-train_index, ]
+```
+
+```{r}
+# Dự đoán giá trị trên tập kiểm tra
+predictions_gam <- predict(m_value_non_tech_gam, newdata = test_data)
+
+# Đánh giá mô hình: tính R-squared (R²) và RMSE (Root Mean Squared Error)
+library(Metrics)
+
+# Tính R² và RMSE
+r_squared <- 1 - sum((test_data$value - predictions_gam)^2) / sum((test_data$value - mean(test_data$value))^2)
+rmse_value <- rmse(test_data$value, predictions_gam)
+
+# In kết quả đánh giá
+cat("R-squared: ", r_squared, "\n")
+cat("RMSE: ", rmse_value, "\n")
+```
+
+Hệ số R-squared = 0.9807, cho thấy mô hình giải thích được 99.07% biến thiên trong giá trị chuyển nhượng
+
+```{r}
+mean_value <- mean(fifa_data$value)
+rmse_ratio <- rmse_value / mean_value
+cat("RMSE/Mean: ", rmse_ratio, "\n")
+
+```
+
+Dự đoán của mô hình có mức sai số trung bình khá nhỏ so với giá trị trung bình thực tế. Chứng tỏ rằng mô hình dự đoán khá chính xác so với giá trị thực tế
+
+### Cách tiếp cận 2: Dự đoán value dựa trên các biến Technical
+
+#### Tiền xử lý 
+```{r}
+# Group theo position thành làm 4 class chính như đã giải thích ở trên:
+# GK (Thủ môn), DF (Cầu thủ phòng ngự), MID (Tiền vệ), FW (Cầu thủ tấn công)
+
+numeric_fifa_data = fifa_data %>% dplyr::select(all_of(tech_features) | value)
+
+position_mapping = list(
+  Goalkeeper = c("GK"),
+  Defender = c("CB", "LCB", "RCB", "LB", "RB", "LWB", "RWB"),
+  Midfielder = c("CDM", "CM", "LCM", "RCM", "CAM", "LM", "RM", "LDM", "RDM", "LAM", "RAM"),
+  Forward = c("CF", "ST", "LS", "RS", "RF", "LF", "LW", "RW")
+)
+
+# Tạo cột mới broad_position
+fifa_data$broad_position = NA
+for (broad_pos in names(position_mapping)) {
+   fifa_data$broad_position[fifa_data$position %in% position_mapping[[broad_pos]]] = broad_pos
+}
+
+gk_data = numeric_fifa_data[fifa_data$broad_position == "Goalkeeper", ]
+df_data = numeric_fifa_data[fifa_data$broad_position == "Defender", ]
+mid_data = numeric_fifa_data[fifa_data$broad_position == "Midfielder", ]
+fw_data = numeric_fifa_data[fifa_data$broad_position == "Forward", ]
+```
+
+```{r}
+tech_features_1 = tech_features[!tech_features %in% c("skill_moves", "weak_foot")]
+for (position in c("Goalkeeper", "Defender", "Midfielder", "Forward")){
+    technical_data = numeric_fifa_data[fifa_data$broad_position == position, tech_features_1]
+    technical_means = colMeans(technical_data, na.rm = TRUE)
+    means_df = data.frame(Column = names(technical_means), Mean = technical_means)
+
+
+    p = ggplot(means_df, aes(x = reorder(Column, -Mean), y = Mean)) +
+      geom_bar(stat = "identity", fill = "skyblue") +
+      theme_minimal() +
+      labs(title = paste("Mean Values of Technical Attributes for", position), 
+           x = "Technical Attributes", y = "Mean Value") +
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    print(p)
+}
+```
+
+- Từ đồ thị Goalkeeper, ta bỏ cột từ stamina trở đi.
+
+- Hai đồ thị Defender và Midfielder thì bỏ cột liên quan tới GK.
+
+- Còn đồ thị Forward thì bỏ cột marking trở đi.
+
+```{r}
+# Xoá các cột như đồ thị
+# Calculate mean threshold of each categories
+vision_gk_mean = mean(gk_data$vision, na.rm = TRUE)
+sliding_tackle_mid_mean = mean(mid_data$sliding_tackle, na.rm = TRUE)
+finishing_df_mean = mean(df_data$finishing, na.rm = TRUE)
+fk_accuracy_fw_mean = mean(fw_data$fk_accuracy, na.rm = TRUE)
+
+# Calculate column means for each all columns of each categories and remove those with lower technical mean threshold
+gk_means = colMeans(gk_data, na.rm = TRUE)
+gk_data = gk_data %>% dplyr::select(-all_of(c(tech_features_1)) | colnames(gk_data[, gk_means >= vision_gk_mean]))
+
+df_means = colMeans(df_data, na.rm = TRUE)
+df_data = df_data %>% dplyr::select(-all_of(c(tech_features_1)) | colnames(df_data[, df_means >= finishing_df_mean]))
+
+mid_means = colMeans(mid_data, na.rm = TRUE)
+mid_data = mid_data %>% dplyr::select(-all_of(c(tech_features_1)) 
+                                       | colnames(mid_data[, mid_means >= sliding_tackle_mid_mean]))
+
+fw_means = colMeans(fw_data, na.rm = TRUE)
+fw_data = fw_data %>% dplyr::select(-all_of(c(tech_features_1)) | colnames(fw_data[, fw_means >= fk_accuracy_fw_mean]))
+```
+
+```{r}
+# Plot đồ thị tương quan từng vị trí
+data_list = list(gk_data, df_data, mid_data, fw_data)
+positions = c("Goalkeeper", "Defender", "Midfielder", "Forward")
+for (i in seq_along(data_list)){
+  data = data_list[[i]]
+  position = positions[[i]]
+  correlation_matrix = cor(data, use = "complete.obs")
+  # Biểu diễn ma trận tương quan thông số kỹ thuật (demo)
+  melted_corr = melt(correlation_matrix)
+  p <- ggplot(melted_corr, aes(Var1, Var2, fill = value)) +
+    geom_tile(color = "white") +
+    scale_fill_gradient2(low = "blue", high = "red", mid = "white", 
+                         midpoint = 0, limit = c(-1,1), space = "Lab", 
+                         name="Tương quan") +
+    theme_minimal() + 
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+                                     size = 10, hjust = 1)) +
+    coord_fixed() +
+    labs(title = paste("Heatmap of Correlation Matrix using technical stats for", position), x = "Features", y = "Features")
+  print(p)
+}
+```
+
+```{r}
+# Xoá skill_moves
+gk_data = gk_data %>% dplyr::select(-skill_moves)
+```
+
+#### Kiểm tra đa cộng tuyến
+```{r}
+print("GK VIF values")
+print(vif(lm(value ~., data = gk_data)))
+
+print("DF VIF values")
+print(vif(lm(value ~., data = df_data)))
+
+print("MID VIF values")
+print(vif(lm(value ~., data = mid_data)))
+
+print("FW VIF values")
+print(vif(lm(value ~., data = fw_data)))
+```
+
+Trong hàng tiền vệ có VIF của biến standing_tackle > 10 và sliding_tackle gần 10, điều này có thể giải thích do sự tương quan cao giữa hai biến, nên có thể bỏ standing_tackle.
+
+```{r}
+mid_data = mid_data %>% dplyr::select(!standing_tackle)
+md_mid <- lm(value ~., data = mid_data)
+print("VIF MID")
+vif(md_mid)
+```
+
+#### Chuẩn bị hàm chung 
+```{r}
+# HÀM ĐÁNH GIÁ MODEL LINEAR, SỬ DỤNG CHUNG
+evaluate_model = function(model, train_data, test_data, target_col) {
+  predictions = predict(model, newdata = test_data) # lấy tri dự đoán
+  actual = test_data[[target_col]] # lấy gtri thực tế
+  
+  # Tính RMSE
+  rmse = sqrt(mean((actual - predictions)^2, na.rm = TRUE))
+  
+  # Tính R2
+  rsq = 1 - sum((actual - predictions)^2, na.rm = TRUE) / 
+              sum((actual - mean(actual, na.rm = TRUE))^2)
+  
+  cat("Test results \n")
+  cat("RMSE: ", rmse, "\n")
+  cat("R2_score: ", rsq, "\n")
+  
+  return(list(RMSE = rmse, R2 = rsq))
+}
+```
+
+```{r}
+# HÀM CHẨN ĐOÁN MÔ HÌNH
+model_diagnosis <- function(object){
+    # Kiểm tra tính tuyến tính
+    p1 <- ggplot(data = object, mapping = aes(x = .fitted, y = .resid)) +
+          geom_point() +
+          geom_smooth(method = "loess", se = FALSE) +
+          geom_hline(yintercept = 0, linetype = "dashed") +
+          labs(x = "Fitted values", y = "Residuals", title = "Đồ thị kiểm tra tính tuyến tính mô hình") +
+          theme_bw()
+    
+    # Kiểm tra tính đồng nhất phương sai
+    p2 <- ggplot(data = object, mapping = aes(x = .fitted, y = sqrt(abs(.stdresid)))) +
+          geom_point(na.rm = TRUE) +
+          geom_smooth(method = "loess", se = FALSE, na.rm = TRUE) +
+          labs(x = "Fitted Values", 
+               y = expression(sqrt("|Standardized residuals|")), 
+               title = "Đồ thị kiểm tra tính đồng nhất phương sai") +
+          theme_bw()
+    
+    # Kiểm tra giá trị ngoại lai
+    p3 <- ggplot(object, aes(.hat, .stdresid)) +
+          geom_point(aes(size = .cooksd)) +
+          labs(x = "Leverage", y = "Standardized Residuals", title = "Đồ thị kiểm tra giá trị ngoại lai") + 
+          scale_size_continuous("Cook's Distance", range = c(1, 6)) +
+          theme_bw() +
+          theme(legend.position = "bottom")
+    
+    print(p1)
+    print(p2)
+    print(p3)
+}
+```
+
+#### Mô hình cho MID
+```{r}
+set.seed(123) # Đặt seed
+split = sample.split(mid_data$value, SplitRatio = 0.7) # 70% train
+mid_train = subset(mid_data, split == TRUE)
+mid_test = na.omit(subset(mid_data, split == FALSE))
+```
+
+```{r}
+# Hàm dự đoán cho regsubsets
+predict.regsubsets <- function(object, newdata, id_model, form) {
+  x_mat <- model.matrix(form, newdata) # Tạo ma trận model matrix từ dữ liệu mới
+  coef_est <- coef(object, id = id_model) # Lấy hệ số ước lượng cho mô hình tại id_model
+  x_vars <- names(coef_est) # Tên các biến trong mô hình
+  res <- x_mat[, x_vars, drop = FALSE] %*% coef_est # Tính dự đoán bằng ma trận
+  return(as.numeric(res)) # Trả về kết quả dự đoán dưới dạng vector
+}
+
+# Thiết lập tham số
+er_func <- function(data){
+  n <- nrow(data) # Số lượng mẫu trong tập train
+  n_col <- ncol(data)
+  k <- 5 # Số fold
+  set.seed(123)
+  
+  # Chia k-fold
+  folds <- sample(rep(1:k, length.out = n))
+  
+  # Tạo ma trận lưu trữ lỗi cho từng fold và từng số lượng biến
+  cv <- matrix(0, nrow = k, ncol = n_col - 1)
+  formula <- value ~ .
+  
+  # Cross-validation
+  for (r in 1:k) {
+    # Chia dữ liệu thành tập huấn luyện và kiểm tra
+    train_r <- data[folds != r, ]
+    test_r <- data[folds == r, ]
+    
+    # Hồi quy từng bước với regsubsets
+    out_subset_folds <- regsubsets(
+      formula, 
+      data = train_r,
+      method = "forward", 
+      nvmax = n_col - 1
+    )
+    # Dự đoán và tính lỗi cho từng số lượng biến
+    for (j in 1:(n_col-1)) {
+      pred_rj <- predict.regsubsets(
+        object = out_subset_folds, 
+        newdata = test_r, 
+        id_model = j,
+        form = formula
+      )
+      
+      cv[r, j] <- sqrt(mean((test_r$value - pred_rj) ^ 2)) # Tính RMSE
+    }
+  }
+  
+  # Tính trung bình lỗi qua các fold
+  return(colMeans(cv))
+}
+
+er_mid <- er_func(mid_train)
+print(er_mid)
+
+```
+
+
+```{r}
+# Tạo data frame với số lượng biến (1:39) và RMSE trung bình
+ggplot(data = data.frame(x = 1:29, y = er_mid), mapping = aes(x = x, y = y)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Number of predictors", y = "RMSE") +
+  theme_bw()
+```
+
+```{r}
+which.min(er_mid)
+```
+
+*Với method forward thì model được chọn với 23 biến tốt nhất*
+
+```{r}
+out_subset_train_player <- regsubsets(
+  value ~ ., 
+  data = mid_train, 
+  nvmax = 23, 
+  method = "forward"
+)
+
+sum_player <- summary(out_subset_train_player)
+print(sum_player$cp)
+
+selected_vars <- names(coef(out_subset_train_player, 23))[-1]
+print(selected_vars)
+
+```
+
+```{r}
+# Model hồi quy với 23 biến được chọn
+f_best_mid = as.formula(paste("value ~", paste(selected_vars, collapse = " + ")))
+cat("Best Model Formula:\n")
+print(f_best_mid)
+
+model_mid_av <- lm(f_best_mid, data = mid_train)
+
+# Gọi hàm đánh giá
+result_mid = evaluate_model(model = model_mid_av, 
+                          train_data = mid_train, 
+                          test_data = mid_test, 
+                          target_col = "value")
+
+# Kết quả trả về là danh sách RMSE và R2
+print(result_mid)
+
+
+```
+Ta thấy R2 = 0.47354 là kết quả chưa tốt. Lệch 3628482 triệu so với thực tế đối với tiền vệ.    
+
+
+#### Mô hình cho Goalkeeper
+```{r}
+set.seed(123) # Đặt seed
+split = sample.split(gk_data$value, SplitRatio = 0.7) # 70% train
+gk_train = subset(gk_data, split == TRUE)
+gk_test = na.omit(subset(gk_data, split == FALSE))
+```
+
+
+```{r}
+er_gk <- er_func(gk_train)
+print(er_gk)
+print(which.min(er_gk))
+```
+
+```{r}
+ggplot(data = data.frame(x = 1:length(er_gk), y = er_gk), mapping = aes(x = x, y = y)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Number of predictors", y = "RMSE") +
+  theme_bw()
+```
+
+Ta có thể thấy chọn 5 biến là tốt nhất
+
+```{r}
+out_subset_train_player <- regsubsets(
+  value ~ ., 
+  data = gk_train, 
+  nvmax = 5, 
+  method = "forward"
+)
+
+sum_player <- summary(out_subset_train_player)
+print(sum_player$cp)
+
+selected_vars <- names(coef(out_subset_train_player, 5))[-1]
+print(selected_vars)
+```
+
+```{r}
+# Model hồi quy với 3 biến được chọn
+f_best_gk = as.formula(paste("value ~", paste(selected_vars, collapse = " + ")))
+cat("Best Model Formula:\n")
+print(f_best_gk)
+
+model_gk_av <- lm(f_best_gk, data = gk_train)
+
+# Gọi hàm đánh giá
+result_gk = evaluate_model(model = model_gk_av, 
+                          train_data = gk_train, 
+                          test_data = gk_test, 
+                          target_col = "value")
+
+# Kết quả trả về là danh sách RMSE và R2
+print(result_gk)
+```
+R2 = 0.304802 cho thấy model dự đoán không tốt, lệch 2447594 với thực tế của thủ môn.
+
+#### Mô hình cho DF
+```{r}
+set.seed(123) # Đặt seed
+split = sample.split(df_data$value, SplitRatio = 0.7) # 70% train
+df_train = subset(df_data, split == TRUE)
+df_test = na.omit(subset(df_data, split == FALSE))
+```
+
+```{r}
+er_df <- er_func(df_train)
+print(er_df)
+print(which.min(er_df))
+```
+
+```{r}
+ggplot(data = data.frame(x = 1:length(er_df), y = er_df), mapping = aes(x = x, y = y)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Number of predictors", y = "RMSE") +
+  theme_bw()
+```
+
+Dễ thấy mô hình với 24 biến là tốt nhất
+
+```{r}
+out_subset_train_player <- regsubsets(
+  value ~ ., 
+  data = df_train, 
+  nvmax = 24, 
+  method = "forward"
+)
+
+sum_player <- summary(out_subset_train_player)
+print(sum_player$cp)
+
+selected_vars <- names(coef(out_subset_train_player, 24))[-1]
+print(selected_vars)
+```
+
+```{r}
+# Model hồi quy với 35 biến được chọn
+f_best_df = as.formula(paste("value ~", paste(selected_vars, collapse = " + ")))
+cat("Best Model Formula:\n")
+print(f_best_df)
+
+model_df_av <- lm(f_best_df, data = df_train)
+
+# Gọi hàm đánh giá
+result_df = evaluate_model(model = model_df_av, 
+                          train_data = df_train, 
+                          test_data = df_test, 
+                          target_col = "value")
+
+# Kết quả trả về là danh sách RMSE và R2
+print(result_df)
+
+```
+R = 0.4655771 cho thấy model dự đoán chưa tốt, lệch 2867392 so với thực tế đối với hậu vệ
+
+#### Mô hình cho Forward 
+```{r}
+set.seed(123) # Đặt seed
+split = sample.split(fw_data$value, SplitRatio = 0.7) # 70% train
+fw_train = subset(fw_data, split == TRUE)
+fw_test = na.omit(subset(fw_data, split == FALSE))
+```
+
+```{r}
+er_fw <- er_func(fw_train)
+print(er_fw)
+print(which.min(er_fw))
+```
+
+```{r}
+ggplot(data = data.frame(x = 1:length(er_fw), y = er_fw), mapping = aes(x = x, y = y)) +
+  geom_point() +
+  geom_line() +
+  labs(x = "Number of predictors", y = "RMSE") +
+  theme_bw()
+```
+
+Dễ thấy 5 biến là tốt nhất cho mô hình hồi quy của tiền đạo
+
+```{r}
+out_subset_train_player <- regsubsets(
+  value ~ ., 
+  data = fw_train, 
+  nvmax = 5, 
+  method = "forward"
+)
+
+sum_player <- summary(out_subset_train_player)
+print(sum_player$cp)
+
+selected_vars <- names(coef(out_subset_train_player, 5))[-1]
+print(selected_vars)
+```
+
+```{r}
+# Model hồi quy với 5 biến được chọn
+f_best_fw = as.formula(paste("value ~", paste(selected_vars, collapse = " + ")))
+cat("Best Model Formula:\n")
+print(f_best_fw)
+
+model_fw_av <- lm(f_best_fw, data = fw_train)
+
+# Gọi hàm đánh giá
+result_fw = evaluate_model(model = model_fw_av, 
+                          train_data = fw_train, 
+                          test_data = fw_test, 
+                          target_col = "value")
+
+# Kết quả trả về là danh sách RMSE và R2
+print(result_fw)
+```
+R2 = 0.3591482 cho thấy model dự đoán không tốt, lệch 4625396 so với thực tế đối với tiền đạo
+
+#### Chẩn đoán mô hình (cho cả 4 nhóm)
+##### GK
+```{r}
+model_diagnosis(model_gk_av)
+```
+
+##### Mid
+```{r}
+model_diagnosis(model_mid_av)
+```
+
+##### DF
+```{r}
+model_diagnosis(model_df_av)
+```
+
+##### FW
+```{r}
+model_diagnosis(model_fw_av)
+```
+
+*Nhận xét chung:* Cả 4 mô hình đều không thoả tính tuyến tính và đồng nhất phương sai.
+
+### Kết luận cả 2 cách tiếp cận
+
+- Cách tiếp cận với các biến non-technical cho ra mô hình dự đoán tốt giả trị cầu thủ, sử dụng ít biến và có thể tối ưu mô hình hơn để cho ra kết quả gần nhất có thể so với giá trị thực tế của cầu thủ.
+
+- Cách tiếp cận với chỉ với các biến technical sử dụng 4 mô hình cho 4 nhóm vị trí khác nhau cho ra các dự đoán không tốt, các giá trị r2 dưới 0.5 mặc dù sử dụng nhiều biến; cả 4 model đều không thoả tính tuyến tính lẫn đồng nhất phương sai.
+
+=> Như vậy, cách tiếp cận sử dụng các biến non-technical là cách tiếp cận tốt nhất cho bài toán 1 mà ta đang xét.
+
+## Bài toán số 2: Dự đoán vị trí cầu thủ 
+
+```{r}
+technical_cols_unGK = c(
+  "weak_foot", "height", "weight", 
+  "crossing", "finishing", "heading_accuracy", "short_passing", "volleys",
+  "dribbling", "curve", "fk_accuracy", "long_passing", "ball_control",
+  "acceleration", "sprint_speed", "agility", "reactions", "balance",
+  "shot_power", "jumping", "stamina", "strength", "long_shots",
+  "aggression", "interceptions", "positioning", "vision", "penalties",
+  "composure", "marking", "standing_tackle", "sliding_tackle"
+)
+
+# Lấy các cột này từ dữ liệu fifa_data
+fifa_data_unGK <- fifa_data %>% filter(position != "GK")  # Loại bỏ GK
+tech_data = fifa_data_unGK[, c(technical_cols_unGK, "position")]
+
+head(tech_data)
+```
+
+### Cách tiếp cận cơ bản
+```{r}
+glimpse(tech_data)
+```
+
+```{r}
+set.seed(123)
+split = sample.split(tech_data$position, SplitRatio = 0.7) # 70% train
+tech_train = subset(tech_data, split == TRUE)
+tech_test = na.omit(subset(tech_data, split == FALSE))
+```
+
+#### Model Logistic Regression đa lớp
+```{r}
+# Huấn luyện mô hình Logistic Regression đa lớp
+logreg_model = nnet::multinom(position ~ ., data = tech_train)
+
+# Dự đoán xác suất trên tập huấn luyện và kiểm tra
+logreg_pred_train = predict(logreg_model, tech_train, type = "probs")
+logreg_pred_test = predict(logreg_model, tech_test, type = "probs")
+
+# Lấy nhãn dự đoán (class) từ xác suất cao nhất
+logreg_class_train = colnames(logreg_pred_train)[max.col(logreg_pred_train)]
+logreg_class_test = colnames(logreg_pred_test)[max.col(logreg_pred_test)]
+
+# Tính Accuracy
+logreg_accuracy_train <- mean(logreg_class_train == tech_train$position)
+logreg_accuracy_test <- mean(logreg_class_test == tech_test$position)
+print(paste("Logistic Regression Accuracy (Train):", round(logreg_accuracy_train, 4)))
+print(paste("Logistic Regression Accuracy (Test):", round(logreg_accuracy_test, 4)))
+```
+
+```{r}
+roc_train_logreg <- multiclass.roc(tech_train$position, logreg_pred_train)
+roc_test_logreg <- multiclass.roc(tech_test$position, logreg_pred_test)
+auc_train_logreg <- auc(roc_train_logreg)
+auc_test_logreg <- auc(roc_test_logreg)
+
+print(paste("Logistic Regression AUC (Train):", round(auc_train_logreg, 4)))
+print(paste("Logistic Regression AUC (Test):", round(auc_test_logreg, 4)))
+```
+
+Với acc = 0.4324 thì tương đối thấp đối với model Logistic Regression đa lớp. Tuy nhiên điều này có thể chấp nhận được vì bài toán này gốm rất nhiều class và có những lớp gần như tương đồng (rất khó phân biệt). Vì thế kết quả này có thể chấp nhận được.
+
+#### Model Naive Bayes
+```{r}
+# Huấn luyện mô hình Naive Bayes
+nb_model <- naiveBayes(position ~ ., data = tech_train)
+
+# Dự đoán xác suất trên tập huấn luyện và kiểm tra
+nb_pred_train <- predict(nb_model, tech_train, type = "raw")
+nb_pred_test <- predict(nb_model, tech_test, type = "raw")
+
+# Lấy nhãn dự đoán (class) từ xác suất cao nhất
+nb_class_train <- colnames(nb_pred_train)[max.col(nb_pred_train)]
+nb_class_test <- colnames(nb_pred_test)[max.col(nb_pred_test)]
+
+# Tính Accuracy
+nb_accuracy_train <- mean(nb_class_train == tech_train$position)
+nb_accuracy_test <- mean(nb_class_test == tech_test$position)
+print(paste("Naive Bayes Accuracy (Train):", round(nb_accuracy_train, 4)))
+print(paste("Naive Bayes Accuracy (Test):", round(nb_accuracy_test, 4)))
+```
+
+
+```{r}
+# Vẽ đường cong ROC cho Naive Bayes
+roc_train_nb <- multiclass.roc(tech_train$position, nb_pred_train)
+roc_test_nb <- multiclass.roc(tech_test$position, nb_pred_test)
+auc_train_nb <- auc(roc_train_nb)
+auc_test_nb <- auc(roc_test_nb)
+
+print(paste("Naive Bayes AUC (Train):", round(auc_train_nb, 4)))
+print(paste("Naive Bayes AUC (Test):", round(auc_test_nb, 4)))
+```
+
+Tương tự như Logistic Regression đa lớp, Model Naive Bayes cũng có accuracy tương đối thấp, chỉ 0.338, thậm chí nhỏ hơn LR đa lớp. Nên ta sử dụng mô hình LR đa lớp có vẻ tốt hơn. Và phần sau ta chỉ mở rộng bài toán với mô hình LR đa lớp.
+
+### Cách tiếp cận mở rộng
+
+```{r}
+# Chia dữ liệu thành tập huấn luyện và kiểm tra
+set.seed(123)  # Đảm bảo kết quả ngẫu nhiên có thể tái lặp
+train_indices <- sample(1:nrow(tech_data), size = 0.7 * nrow(tech_data))
+train_data <- tech_data[train_indices, ]
+test_data <- tech_data[-train_indices, ]
+
+# Huấn luyện mô hình logistic regression đa lớp
+library(nnet)
+model_expand_2 = nnet::multinom(position ~ ., data = train_data)
+
+# Dự đoán xác suất trên tập kiểm tra
+predicted_probs = predict(model_expand_2, test_data, type = "probs")
+```
+
+```{r}
+# Lấy ví dụ một mẫu ngẫu nhiên từ tập kiểm tra
+set.seed(50)
+sample_index = sample(1:nrow(test_data), 1)
+sample_probs = predicted_probs[sample_index, ]
+sample_actual = test_data$position[sample_index]
+
+# Sắp xếp xác suất và loại bỏ vị trí thực tế
+sorted_probs = sort(sample_probs, decreasing = TRUE)
+main_class = sample_actual  # Lớp thực tế
+main_class_prob = sorted_probs[main_class]
+
+# Loại trừ vị trí thực tế khi tính top 3 vị trí nhầm
+misclassified_probs = sorted_probs[names(sorted_probs) != sample_actual]
+top3_misclassified_classes = names(misclassified_probs[1:3])
+top3_misclassified_probs = misclassified_probs[1:3]
+
+# In ra kết quả
+cat("Mẫu ngẫu nhiên:\n")
+cat("Vị trí thực tế:", sample_actual, "\n")
+cat("Lớp dự đoán chính xác:", main_class, "với xác suất:", main_class_prob, "\n")
+cat("Ba lớp dự đoán nhầm với xác suất cao nhất:\n")
+for (i in 1:3) {
+  cat(top3_misclassified_classes[i], "với xác suất:", top3_misclassified_probs[i], "\n")
+}
+
+```
+- Với ví dụ demo trên thì mẫu đưa vào là thông tin của CAM. thì mô hình tính toán xác suất dự đoán đúng khá cao 0.4933683, và quan trọng hơn là top3 vị trí xác suất dự đoán nhầm vào là CM, CB, LM. trong đó CM khá cao với 0.1965007. Cho thấy cầu thủ này có thể đá sang vị trí CM được. Với lý thuyết thực tế thì điều này khá hợp lý vì CAM với CM cũng dường như tương tự. 
+
+- Từ kết quả này ta có thể nói rằng mô hình này sẽ giúp câu lạc bộ đánh giá được khả năng linh hoạt vị trí của cầu thủ nào đó. Từ đó dễ dàng đưa ra quyết định mua hơn. 
+
+## Bài toán số 3: Dự đoán overall
+
+```{r}
+#Group theo position thành 2 class: GoalKeeper và UnGoalKeeper
+numeric_fifa_data = fifa_data %>% dplyr::select(where(is.numeric))
+
+position_mapping = list(
+  Goalkeeper = c("GK"),
+  UnGoalkeeper = c("CB", "LCB", "RCB", "LB", "RB", "LWB", "RWB", "CDM", "CM", "LCM", "RCM", "CAM", "LM", "RM", "LDM", "RDM", "LAM", "RAM", "CF", "ST", "LS", "RS", "RF", "LF", "LW", "RW")
+)
+
+# Tạo cột mới broad_position
+fifa_data$broad_position = NA
+for (broad_pos in names(position_mapping)) {
+   fifa_data$broad_position[fifa_data$position %in% position_mapping[[broad_pos]]] = broad_pos
+}
+
+gk_data = numeric_fifa_data[fifa_data$broad_position == "Goalkeeper", ]
+un_gk_data = numeric_fifa_data[fifa_data$broad_position == "UnGoalkeeper", ]
+```
+
+### Goalkeeper
+
+#### Kiểm tra đa cộng tuyến
+```{r}
+m_GK <- lm(overall ~ gk_diving + gk_handling + gk_positioning + gk_reflexes + gk_kicking, gk_data)
+vif(m_GK)
+```
+
+1 trong 2 biến gk_diving và gk_reflexes gây ra hiện tượng đa cộng tuyến. ta lựa chọn bỏ đi biến gk_diving
+
+```{r}
+m_GK <- lm(overall ~ gk_handling + gk_positioning + gk_reflexes + gk_kicking, gk_data)
+vif(m_GK)
+```
+
+Hiện tượng đa cộng tuyến đã được xử lý
+
+#### Lựa chọn mô hình
+```{r}
+out_subset_m_GK <- regsubsets(x = overall ~ gk_handling + gk_positioning + gk_reflexes + gk_kicking,
+                                             data = gk_data,
+                                             nvmax = 4,
+                                             method = "exhaustive")
+sum_out_subset_m_GK <- summary(out_subset_m_GK)
+sum_out_subset_m_GK$cp
+```
+
+Ta thấy tập con gồm 4 biến cho kết quả tốt nhất
+
+#### Chẩn đoán mô hình
+
+##### Kiểm tra tính tuyến tính 
+```{r}
+ggplot(data = m_GK, mapping = aes(x = .fitted, y = .resid)) +
+ geom_point() +
+ geom_smooth(method = "loess", se = FALSE) +
+ geom_hline(yintercept = 0, linetype = "dashed") +
+ labs(x = "Fitted values", y = "Residuals") +
+ theme_bw()
+```
+
+Giả định về tính tuyến tính của mô hình chưa phù hợp. Mô hình cũng không đồng nhất phương sai nên ta cân nhắc sử dụng GLM.
+
+##### Kiểm tra giả định đồng nhất phương sai
+```{r}
+ggplot(data = m_GK, mapping = aes(x = .fitted, y = sqrt(abs(.stdresid)))) +
+ geom_point(na.rm = TRUE) +
+ geom_smooth(method = "loess", se = FALSE, na.rm = TRUE) +
+ labs(x = "Fitted Values", y = expression(sqrt("|Standardized residuals|"))) +
+ theme_bw()
+```
+
+##### Kiểm tra giá trị ngoại lai
+```{r}
+ggplot(m_GK, aes(.hat, .stdresid)) +
+ geom_point(aes(size = .cooksd)) +
+ xlab("Leverage") + ylab("Standardized Residuals") +
+ scale_size_continuous("Cook's Distance", range = c(1, 6)) +
+ theme_bw() +
+ theme(legend.position = "bottom")
+```
+
+Ngưỡng tham chiếu 4/n = 4/1900 = 0.002
+
+```{r}
+std_resid_m_GK <- rstandard(m_GK)
+hat_values_m_GK <- hatvalues(m_GK)
+cooks_D_m_GK <- cooks.distance(m_GK)
+
+count1 <- sum(cooks_D_m_GK >= 0.002)
+count2 <- sum(cooks_D_m_GK >= 0.003)
+count3 <- sum(cooks_D_m_GK >= 0.004)
+
+count1
+count2
+count3
+```
+
+Các điểm có cook's distance >= 0.002 chiếm khoảng 7% fifa_data, ta có thể bỏ chúng.
+
+```{r}
+gk_data <- gk_data[cooks_D_m_GK < 0.002, ]
+```
+
+#### Mở rộng mô hình
+```{r}
+m_GK_GLM <- glm(overall ~ gk_handling + gk_positioning + gk_reflexes + gk_kicking,
+                data = gk_data,
+                family = Gamma(link = "identity"))
+m_GK_2 <- lm(overall ~ gk_handling + gk_positioning + gk_reflexes + gk_kicking,
+             data = gk_data)
+```
+
+##### Đánh giá mô hình
+```{r}
+set.seed(110)
+
+index <- createDataPartition(gk_data$overall, p = 0.7, list = FALSE)
+train_data <- gk_data[index,]
+test_data <- gk_data[-index,]
+
+result_GK_1 <- evaluate_model(m_GK, train_data, test_data, "overall")
+result_GK_2 <- evaluate_model(m_GK_2, train_data, test_data, "overall")
+result_GK_3 <- evaluate_model(m_GK_GLM, train_data, test_data, "overall")
+```
+
+Mô hình ban đầu hay mô hình mở rộng đều cho chỉ số r2_score gần như nhau và đều khá tốt 0.9863036 và 0.9862906. Cho thấy mô hình dự đoán rất tốt.
+
+### UnGoalkeeper
+
+Lựa chọn các thuộc tính cho cầu thủ phía trên thủ môn
+
+```{r}
+# Phần này có ở trên bài toán 1.2 nhưng để lại cho rõ 
+technical_cols_unGK = c("overall",
+  "weak_foot", "height", "weight", 
+  "crossing", "finishing", "heading_accuracy", "short_passing", "volleys",
+  "dribbling", "curve", "fk_accuracy", "long_passing", "ball_control",
+  "acceleration", "sprint_speed", "agility", "reactions", "balance",
+  "shot_power", "jumping", "stamina", "strength", "long_shots",
+  "aggression", "interceptions", "positioning", "vision", "penalties",
+  "composure", "marking", "standing_tackle", "sliding_tackle"
+)
+
+tech_data = un_gk_data %>% select(all_of(technical_cols_unGK))
+```
+
+#### Kiểm tra đa cộng tuyến
+
+```{r}
+m_un_GK <- lm(overall ~ ., tech_data)
+vif(m_un_GK)
+```
+
+Loại bỏ các biến gây ra hiện tượng đa cộng tuyến
+
+```{r}
+m_un_GK <- lm(overall ~ . -standing_tackle -finishing -interceptions -ball_control, tech_data)
+vif(m_un_GK)
+```
+#### Lựa chọn mô hình
+
+```{r}
+out_subset_m_un_GK <- regsubsets(x = overall ~ . -standing_tackle -finishing -interceptions -ball_control,
+                              data = tech_data,
+                              nvmax = 28,
+                              method = "exhaustive")
+sum_out_subset_m_un_GK <- summary(out_subset_m_un_GK)
+sum_out_subset_m_un_GK$cp
+```
+
+```{r}
+# Xem tập biến con tốt nhất
+sum_out_subset_m_un_GK$which[which.min(sum_out_subset_m_un_GK$cp),]
+```
+```{r}
+# Xây dựng lại mô hình dựa trên tập biến con tốt nhất 
+m_un_GK <- lm(overall ~ . -standing_tackle -finishing -interceptions -ball_control -volleys -aggression -jumping,
+              tech_data)
+```
+
+#### Chẩn đoán mô hình
+
+##### Kiểm tra tính tuyến tính
+```{r}
+ggplot(data = m_un_GK, mapping = aes(x = .fitted, y = .resid)) +
+ geom_point() +
+ geom_smooth(method = "loess", se = FALSE) +
+ geom_hline(yintercept = 0, linetype = "dashed") +
+ labs(x = "Fitted values", y = "Residuals") +
+ theme_bw()
+
+```
+
+
+Giả định về tính tuyến tính của mô hình có vẻ chưa phù hợp.
+
+##### Kiểm tra giả định đồng nhất phương sai
+```{r}
+ggplot(data = m_un_GK, mapping = aes(x = .fitted, y = sqrt(abs(.stdresid)))) +
+ geom_point(na.rm = TRUE) +
+ geom_smooth(method = "loess", se = FALSE, na.rm = TRUE) +
+ labs(x = "Fitted Values", y = expression(sqrt("|Standardized residuals|"))) +
+ theme_bw()
+```
+
+Mô hình không có sự đồng nhất phương sai. 
+
+##### Kiểm tra outliers
+```{r}
+ggplot(m_un_GK, aes(.hat, .stdresid)) +
+ geom_point(aes(size = .cooksd)) +
+ xlab("Leverage") + ylab("Standardized Residuals") +
+ scale_size_continuous("Cook's Distance", range = c(1, 6)) +
+ theme_bw() +
+ theme(legend.position = "bottom")
+```
+
+Ngưỡng tham chiếu 4/n = 4/14743 = 0.0003
+
+```{r}
+std_resid_m_un_GK <- rstandard(m_un_GK)
+hat_values_m_un_GK <- hatvalues(m_un_GK)
+cooks_D_m_un_GK <- cooks.distance(m_un_GK)
+
+count4 <- sum(cooks_D_m_un_GK >= 0.0003)
+count5 <- sum(cooks_D_m_un_GK >= 0.0004)
+count6 <- sum(cooks_D_m_un_GK >= 0.0005)
+
+count4
+count5
+count6
+```
+
+Những điểm dữ liệu có cook's distance >= 0.0003 chiếm 4% fifa_data. Ta loại bỏ chúng
+
+```{r}
+tech_data <- tech_data[cooks_D_m_un_GK < 0.0003, ]
+```
+
+#### Mở rộng mô hình
+```{r}
+m_un_GK_GLM <- glm(overall ~ . -standing_tackle -finishing -interceptions -ball_control -volleys -aggression -jumping,
+                data = tech_data,
+                family = Gamma(link = "identity"))
+m_un_GK_2 <- lm(overall ~ . -standing_tackle -finishing -interceptions -ball_control -volleys -aggression -jumping,
+             data = tech_data)
+```
+##### Đánh giá mô hình
+```{r}
+index <- createDataPartition(tech_data$overall, p = 0.7, list = FALSE)
+train_data <- tech_data[index,]
+test_data <- tech_data[-index,]
+
+result_un_GK_1 <- evaluate_model(m_un_GK, train_data, test_data, "overall")
+result_un_GK_2 <- evaluate_model(m_un_GK_2, train_data, test_data, "overall")
+result_un_GK_3 <- evaluate_model(m_un_GK_GLM, train_data, test_data, "overall")
+```
+
+Mô hình ban đầu hay mô hình mở rộng đều cho chỉ số r2_score như nhau.
+
+
+## Bài toán số 4: Dự đoán sự tiềm năng của cầu thủ
+- Với đánh giá sơ bộ của cầu thủ thì nhóm xem xét các biến có khả năng ảnh hưởng đến tiềm năng (potential) của cầu thủ như là: age, overall, wage, value, international_reputation, height, weight, release_clause. Các biến kỹ thuật thì chỉ giải thích cho overall hơn là potential nên là ở bài toán này nhóm quyết định chỉ dùng số biến cơ sở ban đầu như trên.
+
+- Bài toán này có nhiều cách tiếp cận, với potential là biến liên tục với giá trị [0,100] và tuân theo phân phối chuẩn nên việc dự đoán tiềm năng (theo cách phân loại) thì cần phải chuyển đổi biến sang định tính. Như đã nói vì potential tuân theo phân phối chuẩn nên việc chia nhóm cần phải thật kỹ, nhóm quyết định chia ra 2 cách tiếp cận. Một là chia thành 2 nhóm (trước mean và sau mean), cách tiếp cận này là cơ bản nhất vì dữ liệu cảu từng nhóm sẽ không bị imbalance. Cách thứ hai là chia làm 3 nhóm, cách này thì sẽ cần xem xét kỹ hơn nhưng lợi ích là phân loại rõ hơn. thay vì chỉ có "có tiềm năng" và "không tiềm năng". Điều này giúp câu lạc bộ dễ đưa ra quyết định hơn. Tuy nhiên ta cần xử lý và xây dựng model để xem model với cách chia nào tốt hơn rồi mới đưa ra kết luận được.
+
+### Cách tiếp cận 1: Chia potential thành 3 nhóm
+```{r}
+# Tính z-score và phân loại potential thành 3 nhóm
+fifa_data_4 = fifa_data %>%
+  mutate(
+    z_score = (potential - mean(potential, na.rm = TRUE)) / sd(potential, na.rm = TRUE), # Tính z-score
+    potential_class = case_when(
+      z_score < -0.43 ~ 1, #Thấp 
+      z_score >= -0.43 & z_score <= 0.43 ~ 2, #Trung bình
+      z_score > 0.43 ~ 3 #Cao        
+    )
+  )
+
+# Kiểm tra số lượng cầu thủ trong từng nhóm
+table(fifa_data_4$potential_class)
+```
+
+Số lượng cầu thủ trong từng nhóm phân bố tương đối đồng đều
+
+```{r}
+# Tính hệ số tương quan giữa các biến và potential_class
+correlation_matrix <- cor(fifa_data_4 %>% select(age, overall, wage, value, international_reputation, height, weight, release_clause, potential_class), use = "complete.obs")
+
+# Lấy hệ số tương quan của potential_class với các biến khác
+correlation_with_class <- correlation_matrix["potential_class",]
+
+# Chọn các biến có hệ số tương quan lớn hơn một ngưỡng nhất định (0.3)
+selected_features <- names(correlation_with_class[abs(correlation_with_class) > 0.3])
+
+# Hiển thị các biến được chọn
+selected_features
+```
+
+#### Multinomial Logistic Regression 
+```{r}
+# lặp 100 lần
+set.seed(123)
+m_potential = nnet::multinom(potential_class ~ age + overall + wage + release_clause, fifa_data_4, maxit = 100)
+```
+#### Đánh giá mô hình sử dụng confusion matrix và các điểm 
+
+```{r}
+#confuse matrix
+prod_pred_potential = predict(m_potential, type = "class")
+conf_matrix_potential = table(fifa_data_4$potential_class, prod_pred_potential)
+
+eval_multi_class = function(x) {
+  cc <- sum(diag(x))
+  sc <- sum(x)
+  pp <- colSums(x)
+  tt <- rowSums(x)
+  ##
+  prec <- diag(x)/colSums(x)
+  recall <- diag(x)/rowSums(x)
+  macro_prec <- mean(prec)
+  macro_recall <- mean(recall)
+  macro_f1 <- 2 * macro_prec * macro_recall/(1/macro_prec + 1/macro_recall)
+  acc <- cc/sc
+  kap <- (cc * sc - sum(pp * tt))/(sc^2 - sum(pp * tt))
+  return(list(Precision = prec, Recall = recall, Accuracy = acc, Kappa = kap, Macro_F1 = macro_f1))
+}
+eval_multi_class(conf_matrix_potential)
+
+```
+
+Đánh giá: 
+- Confusion matrix cho thấy mô hình dự đoán khá tốt, đặc biệt là cho nhóm tiềm năng thấp (1) và cao (3). Tuy nhiên, có sự nhầm lẫn đáng kể giữa nhóm tiềm năng trung bình (2) với hai nhóm còn lại.
+- Độ chính xác (Accuracy) tổng thể của mô hình là 0.8090488 , cho thấy mô hình hoạt động khá tốt.
+- Giá trị Kappa là 0.7128401, thể hiện sự phù hợp đáng kể giữa dự đoán của mô hình và thực tế.
+- Độ chính xác (Precision) và độ nhạy (Recall) cho từng nhóm tiềm năng khá cao, ngoại trừ độ chính xác cho nhóm tiềm năng trung bình (2) là thấp hơn.
+- Macro-F1 score là 0.5231273, cho thấy hiệu suất tổng thể của mô hình trên cả ba nhóm tiềm năng.
+
+### Cách tiếp cận 2: Chia potential thành 2 nhóm
+#### Tiền xử lý 
+```{r}
+# Gán nhãn nhị phân dựa vào potential
+# High Potential (1) nếu nó lớn hơn mean và ngược lại thì là Not High Potential là 0
+mean_potential <- mean(fifa_data$potential, na.rm = TRUE)
+# Gán nhãn nhị phân
+fifa_data_4_2 <- fifa_data %>%
+  mutate(potential_class = factor(ifelse(potential >= mean_potential, 1, 0)))
+
+# Kiểm tra phân phối nhãn
+table(fifa_data_4_2$potential_class)
+```
+
+Phân phối của các nhãn không quá chênh lệch.
+
+```{r}
+# Kiểm tra tương quan
+library(corrplot)
+cor_matrix <- cor(fifa_data_4_2[, c("age", "value", "wage")])
+corrplot(cor_matrix, method = "number")
+```
+Tương quan thấp giữa age với value và wage giúp các biến này đóng góp độc lập vào mô hình -> Lương của cầu thủ không phụ thuộc nhiều vào độ tuổi
+Tương quan cao giữa value và wage -> Cầu thủ có giá trị càng cao thì thường có mức lương càng cao
+
+```{r}
+# Chia dữ liệu thành tập huấn luyện và kiểm tra
+set.seed(123)
+train_data <- sample(nrow(fifa_data_4_2), 0.7 * nrow(fifa_data_4_2))
+test_data <- setdiff(1:nrow(fifa_data_4_2), train_data)
+train_data <- fifa_data_4_2[train_data, ]
+test_data <- fifa_data_4_2[test_data, ]
+```
+
+1,Xây dựng mô hình hồi quy logistic dự đoán khả năng "High Potential".
+```{r}
+out_md <- glm(formula = potential_class ~ age+ value + wage,data = train_data, family = binomial)
+summary(out_md)
+```
+
+Ta thấy tất cả các giá trị p đều nhỏ hơn α = 0.05, điều đó có nghĩa là tất cả các biến đều có ý nghĩa thống kê đối với mô hình logistic điều này cho thấy rằng các biến này đóng vai trò quan trọng trong việc dự đoán biến phụ thuộc potential_class.
+
+B1 = -0.5.442:hệ số âm cho thấy khi age tăng khả năng thuộc potential_class giảm thể hiện sự ngược chiều giữa age và khả năng thuộc potential_class.
+
+B2 = 3.657e-06hệ số dương thể hiện rằng khi value tăng khả năng thuộc potential_class tăng.
+
+B3 = 5.338e-05:hệ số dương cho thấy wage cao hơn làm tăng khả năng thuộc potential_class.
+
+2: Đánh giá mô hình dựa trên 2 tập 
+
+Sử dụng ROC curve và AUC để đánh giá hiệu quả của mô hình.
+```{r}
+# Dự đoán và đánh giá mô hình trên tập huấn luyện
+predictions_train <- predict(out_md, train_data, type = "response")
+predictions_class_train <- ifelse(predictions_train > 0.5, 1, 0)
+roc_train <- roc(train_data$potential_class~predictions_train)
+cat("Train Results:\n")
+auc_train<-roc_train$auc
+cat("AUC: ", auc_train, "\n")
+
+```
+AUC khá cao với kết quả 0.957627
+
+```{r}
+# Dự đoán và đánh giá mô hình trên tập kiểm tra
+predictions_test <- predict(out_md, test_data, type = "response")
+predictions_class_test <- ifelse(predictions_test > 0.5, 1, 0)
+roc_test <- roc(test_data$potential_class~predictions_test)
+cat("Test Results:\n")
+auc_test<-roc_test$auc
+cat("AUC: ", auc_test, "\n")
+```
+
+Mô hình có hiệu suất rất tốt với AUC > 0.95 trên cả tập train và test
+
+```{r}
+# Confusion Matrix trên tập test
+conf_matrix <- confusionMatrix(
+  factor(predictions_class_test),
+  factor(test_data$potential_class)
+)
+print(conf_matrix)
+```
+
+- Accuracy: 0.8924 Mô hình có độ chính xác cao, với khoảng 89,24% các dự đoán là đúng.
+
+- 95% CI : (0.8872, 0.9037):mô hình có độ chính xác (0.8835, 0.9009)
+
+- Sensitivity: 93.57%: Mô hình có khả năng phát hiện rất tốt các trường hợp "High Potential"
+
+- Specificity: 84.07%: Mô hình có khả năng phát hiện "Not High Potential" khá tốt
+
+```{r}
+# Vẽ đường cong ROC
+plot(roc_train, main = "ROC Curve", col = "blue")
+lines(roc_test, col = "red")
+legend("bottomright", legend = c("Train", "Test"), 
+       col = c("blue", "red"), lwd = 2)
+```
+
+# -----------------------------------------------------------------HẾT-------------------------------------------------------------------
+
+
+
+
+
